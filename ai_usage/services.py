@@ -5,9 +5,8 @@ from logging import getLogger
 from typing import IO, Any
 
 import litellm
-from agents import Agent, ModelSettings, RunConfig, Runner
+from agents import Agent, ModelSettings, RunConfig, Runner, Usage
 from openai.types.responses import ResponseInputItemParam
-from agents.exceptions import AgentsException
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.tracing import TracingConfig
 from django.conf import settings
@@ -45,8 +44,8 @@ class AIClient:
             name=self.feature,
             model=LitellmModel(model=model, api_key=api_key),
             instructions=instructions,
-            model_settings=(model_settings or ModelSettings()).resolve(
-                ModelSettings(extra_args={"timeout": timeout})
+            model_settings=self._get_model_settings(
+                provider, timeout, max_turns, model_settings
             ),
             **agent_kwargs,
         )
@@ -60,6 +59,21 @@ class AIClient:
         finally:
             self._delete_files(provider, api_key, file_inputs)
 
+    def _get_model_settings(
+        self,
+        provider: str,
+        timeout: float,
+        max_turns: int,
+        model_settings: ModelSettings | None,
+    ) -> ModelSettings:
+        extra_args: dict[str, Any] = {"timeout": timeout}
+        if provider == "anthropic" and max_turns > 1:
+            extra_args["cache_control_injection_points"] = [
+                {"location": "message", "index": -1}
+            ]
+
+        return ModelSettings(extra_args=extra_args).resolve(model_settings)
+
     def _run_agent(self, agent, model, message, max_turns, tracing_disabled):
         started_at = time.monotonic()
         try:
@@ -69,14 +83,13 @@ class AIClient:
                 max_turns=max_turns,
                 run_config=self._configure_tracing(model, tracing_disabled),
             )
-        except AgentsException as exception:
+        except Exception as exception:
             # The agent failed midway: the turns already run have been paid for
-            if exception.run_data is not None:
-                self._store_usage(
-                    model, exception.run_data.context_wrapper.usage, started_at
-                )
+            run_data = getattr(exception, "run_data", None)
+            usage = run_data.context_wrapper.usage if run_data else Usage()
+            self._store_usage(agent, model, usage, started_at, succeeded=False)
             raise
-        self._store_usage(model, result.context_wrapper.usage, started_at)
+        self._store_usage(agent, model, result.context_wrapper.usage, started_at)
         return result.final_output
 
     def _configure_tracing(self, model, tracing_disabled):
@@ -149,31 +162,43 @@ class AIClient:
                 except Exception:
                     logger.warning(f"Could not delete the uploaded file {file_id}")
 
-    def _store_usage(self, model, usage, started_at):
-        if usage.requests == 0:
+    def _store_usage(self, agent, model, usage, started_at, succeeded=True):
+        if usage.requests == 0 and succeeded:
             return
 
         provider, model_name = model.split("/", 1)
+        reasoning = agent.model_settings.reasoning
         AIUsage.objects.create(
             provider=provider,
             model=model_name,
             feature=self.feature,
+            reasoning_effort=(reasoning and reasoning.effort) or "",
             input_tokens=usage.input_tokens,
+            cached_tokens=usage.input_tokens_details.cached_tokens,
+            cache_write_tokens=usage.input_tokens_details.cache_write_tokens,
             output_tokens=usage.output_tokens,
+            reasoning_tokens=usage.output_tokens_details.reasoning_tokens,
+            total_tokens=usage.total_tokens,
             turns=usage.requests,
             cost=self._compute_cost(model, usage),
             duration_ms=(time.monotonic() - started_at) * 1000,
+            succeeded=succeeded,
         )
 
     def _compute_cost(self, model, usage):
-        try:
-            input_cost, output_cost = litellm.cost_per_token(
-                model=model,
-                prompt_tokens=usage.input_tokens,
-                completion_tokens=usage.output_tokens,
-                cache_read_input_tokens=usage.input_tokens_details.cached_tokens,
-            )
-        except Exception:
-            # Model missing from the litellm price map: the cost stays empty
-            return None
-        return input_cost + output_cost
+        cost = 0
+        for request_usage in usage.request_usage_entries or [usage]:
+            input_details = request_usage.input_tokens_details
+            try:
+                input_cost, output_cost = litellm.cost_per_token(
+                    model=model,
+                    prompt_tokens=request_usage.input_tokens,
+                    completion_tokens=request_usage.output_tokens,
+                    cache_read_input_tokens=input_details.cached_tokens,
+                    cache_creation_input_tokens=input_details.cache_write_tokens,
+                )
+            except Exception:
+                # Model missing from the litellm price map: the cost stays empty
+                return None
+            cost += input_cost + output_cost
+        return cost
