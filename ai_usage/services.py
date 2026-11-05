@@ -1,3 +1,5 @@
+import base64
+import mimetypes
 import time
 from logging import getLogger
 from typing import IO, Any
@@ -26,7 +28,7 @@ class AIClient:
         message: str | list[ResponseInputItemParam],
         max_turns: int = 1,
         tracing_disabled: bool = False,
-        files: list[tuple[str, IO[bytes]]] | None = None,
+        files: list[tuple[str, IO[bytes]] | tuple[str, IO[bytes], str]] | None = None,
         timeout: float = 600,
         model_settings: ModelSettings | None = None,
         **agent_kwargs: Any,
@@ -47,16 +49,15 @@ class AIClient:
             ),
             **agent_kwargs,
         )
-        uploaded_file_ids = []
+        file_inputs = []
         try:
-            for filename, content in files or []:
-                uploaded_file_ids.append(
-                    self._upload_file(provider, api_key, filename, content, timeout)
-                )
-            message = self._add_files(message, uploaded_file_ids)
+            file_inputs = self._build_file_inputs(
+                provider, api_key, files or [], timeout
+            )
+            message = self._add_files(message, file_inputs)
             return self._run_agent(agent, model, message, max_turns, tracing_disabled)
         finally:
-            self._delete_files(provider, api_key, uploaded_file_ids)
+            self._delete_files(provider, api_key, file_inputs)
 
     def _run_agent(self, agent, model, message, max_turns, tracing_disabled):
         started_at = time.monotonic()
@@ -88,13 +89,35 @@ class AIClient:
         )
         return uploaded_file.id
 
-    def _add_files(self, message, file_ids):
-        if not file_ids:
+    def _build_file_inputs(self, provider, api_key, files, timeout):
+        file_inputs = []
+        for filename, content, *optional_mime_type in files:
+            mime_type = self._get_mime_type(filename, optional_mime_type)
+            if mime_type and mime_type.startswith("image/"):
+                encoded_content = base64.b64encode(content.read()).decode("ascii")
+                file_inputs.append(
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:{mime_type};base64,{encoded_content}",
+                    }
+                )
+            else:
+                file_id = self._upload_file(
+                    provider, api_key, filename, content, timeout
+                )
+                file_inputs.append({"type": "input_file", "file_id": file_id})
+        return file_inputs
+
+    def _get_mime_type(self, filename, optional_mime_type):
+        if optional_mime_type:
+            return optional_mime_type[0]
+        else:
+            return mimetypes.guess_type(filename)[0]
+
+    def _add_files(self, message, file_inputs):
+        if not file_inputs:
             return message
 
-        file_inputs = [
-            {"type": "input_file", "file_id": file_id} for file_id in file_ids
-        ]
         if isinstance(message, str):
             return [
                 {
@@ -105,14 +128,16 @@ class AIClient:
         else:
             return [*message, {"role": "user", "content": file_inputs}]
 
-    def _delete_files(self, provider, api_key, file_ids):
-        for file_id in file_ids:
-            try:
-                litellm.file_delete(
-                    file_id, custom_llm_provider=provider, api_key=api_key
-                )
-            except Exception:
-                logger.warning(f"Could not delete the uploaded file {file_id}")
+    def _delete_files(self, provider, api_key, file_inputs):
+        for file_input in file_inputs:
+            file_id = file_input.get("file_id")
+            if file_id:
+                try:
+                    litellm.file_delete(
+                        file_id, custom_llm_provider=provider, api_key=api_key
+                    )
+                except Exception:
+                    logger.warning(f"Could not delete the uploaded file {file_id}")
 
     def _store_usage(self, model, usage, started_at):
         if usage.requests == 0:
