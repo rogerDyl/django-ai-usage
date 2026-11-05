@@ -1,5 +1,6 @@
 import time
-from typing import Any
+from logging import getLogger
+from typing import IO, Any
 
 import litellm
 from agents import Agent, RunConfig, Runner
@@ -10,6 +11,8 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
 from ai_usage.models import AIUsage
+
+logger = getLogger(__name__)
 
 
 class AIClient:
@@ -23,6 +26,7 @@ class AIClient:
         message: str | list[ResponseInputItemParam],
         max_turns: int = 1,
         tracing_disabled: bool = False,
+        files: list[tuple[str, IO[bytes]]] | None = None,
         **agent_kwargs: Any,
     ) -> Any:
         provider = model.split("/", 1)[0]
@@ -38,6 +42,18 @@ class AIClient:
             instructions=instructions,
             **agent_kwargs,
         )
+        uploaded_file_ids = []
+        try:
+            for filename, content in files or []:
+                uploaded_file_ids.append(
+                    self._upload_file(provider, api_key, filename, content)
+                )
+            message = self._add_files(message, uploaded_file_ids)
+            return self._run_agent(agent, model, message, max_turns, tracing_disabled)
+        finally:
+            self._delete_files(provider, api_key, uploaded_file_ids)
+
+    def _run_agent(self, agent, model, message, max_turns, tracing_disabled):
         started_at = time.monotonic()
         try:
             result = Runner.run_sync(
@@ -55,6 +71,41 @@ class AIClient:
             raise
         self._store_usage(model, result.context_wrapper.usage, started_at)
         return result.final_output
+
+    def _upload_file(self, provider, api_key, filename, content):
+        uploaded_file = litellm.create_file(
+            file=(filename, content),
+            purpose="user_data",
+            custom_llm_provider=provider,
+            api_key=api_key,
+        )
+        return uploaded_file.id
+
+    def _add_files(self, message, file_ids):
+        if not file_ids:
+            return message
+
+        file_inputs = [
+            {"type": "input_file", "file_id": file_id} for file_id in file_ids
+        ]
+        if isinstance(message, str):
+            return [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": message}, *file_inputs],
+                }
+            ]
+        else:
+            return [*message, {"role": "user", "content": file_inputs}]
+
+    def _delete_files(self, provider, api_key, file_ids):
+        for file_id in file_ids:
+            try:
+                litellm.file_delete(
+                    file_id, custom_llm_provider=provider, api_key=api_key
+                )
+            except Exception:
+                logger.warning(f"Could not delete the uploaded file {file_id}")
 
     def _store_usage(self, model, usage, started_at):
         if usage.requests == 0:
