@@ -3,7 +3,7 @@ from logging import getLogger
 from typing import IO, Any
 
 import litellm
-from agents import Agent, RunConfig, Runner
+from agents import Agent, ModelSettings, RunConfig, Runner
 from openai.types.responses import ResponseInputItemParam
 from agents.exceptions import AgentsException
 from agents.extensions.models.litellm_model import LitellmModel
@@ -27,6 +27,8 @@ class AIClient:
         max_turns: int = 1,
         tracing_disabled: bool = False,
         files: list[tuple[str, IO[bytes]]] | None = None,
+        timeout: float = 600,
+        model_settings: ModelSettings | None = None,
         **agent_kwargs: Any,
     ) -> Any:
         provider = model.split("/", 1)[0]
@@ -40,13 +42,16 @@ class AIClient:
             name=self.feature,
             model=LitellmModel(model=model, api_key=api_key),
             instructions=instructions,
+            model_settings=(model_settings or ModelSettings()).resolve(
+                ModelSettings(extra_args={"timeout": timeout})
+            ),
             **agent_kwargs,
         )
         uploaded_file_ids = []
         try:
             for filename, content in files or []:
                 uploaded_file_ids.append(
-                    self._upload_file(provider, api_key, filename, content)
+                    self._upload_file(provider, api_key, filename, content, timeout)
                 )
             message = self._add_files(message, uploaded_file_ids)
             return self._run_agent(agent, model, message, max_turns, tracing_disabled)
@@ -72,12 +77,14 @@ class AIClient:
         self._store_usage(model, result.context_wrapper.usage, started_at)
         return result.final_output
 
-    def _upload_file(self, provider, api_key, filename, content):
+    def _upload_file(self, provider, api_key, filename, content, timeout):
         uploaded_file = litellm.create_file(
             file=(filename, content),
-            purpose="user_data",
+            # litellm's Literal omits "user_data", which OpenAI requires for input_file
+            purpose="user_data",  # type: ignore[arg-type]
             custom_llm_provider=provider,
             api_key=api_key,
+            timeout=timeout,
         )
         return uploaded_file.id
 
