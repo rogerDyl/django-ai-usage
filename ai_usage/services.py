@@ -9,6 +9,7 @@ from agents import Agent, ModelSettings, RunConfig, Runner
 from openai.types.responses import ResponseInputItemParam
 from agents.exceptions import AgentsException
 from agents.extensions.models.litellm_model import LitellmModel
+from agents.tracing import TracingConfig
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
@@ -66,7 +67,7 @@ class AIClient:
                 agent,
                 message,
                 max_turns=max_turns,
-                run_config=RunConfig(tracing_disabled=tracing_disabled),
+                run_config=self._configure_tracing(model, tracing_disabled),
             )
         except AgentsException as exception:
             # The agent failed midway: the turns already run have been paid for
@@ -77,6 +78,15 @@ class AIClient:
             raise
         self._store_usage(model, result.context_wrapper.usage, started_at)
         return result.final_output
+
+    def _configure_tracing(self, model, tracing_disabled):
+        provider = model.split("/", 1)[0]
+        if provider == "openai" and not tracing_disabled:
+            return RunConfig(
+                tracing=TracingConfig(api_key=settings.AI_USAGE_API_KEYS[provider])
+            )
+        else:
+            return RunConfig(tracing_disabled=True)
 
     def _upload_file(self, provider, api_key, filename, content, timeout):
         uploaded_file = litellm.create_file(
