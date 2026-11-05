@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-ai-usage"
-version = "0.1.0"
+version = "0.1.1"
 description = "Calls AI models through the OpenAI Agents SDK and LiteLLM, and stores their usage in the database."
 requires-python = ">=3.11"
 dependencies = [

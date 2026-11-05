@@ -1,1 +1,1 @@
-# django-ai-usage
+# django-ai-usage app
