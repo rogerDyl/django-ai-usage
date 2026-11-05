@@ -1,7 +1,9 @@
 import time
+from typing import Any
 
 import litellm
 from agents import Agent, Runner
+from openai.types.responses import ResponseInputItemParam
 from agents.exceptions import AgentsException
 from agents.extensions.models.litellm_model import LitellmModel
 
@@ -9,21 +11,28 @@ from ai_usage.models import AIUsage
 
 
 class AIClient:
-    def __init__(self, feature):
+    def __init__(self, feature: str):
         self.feature = feature
 
-    def run(self, model, instructions, message, max_turns=1, **agent_kwargs):
+    def run(
+        self,
+        model: str,
+        instructions: str,
+        message: str | list[ResponseInputItemParam],
+        max_turns: int = 1,
+        **agent_kwargs: Any,
+    ) -> Any:
         agent = Agent(
             name=self.feature,
             model=LitellmModel(model=model),
             instructions=instructions,
-            **agent_kwargs
+            **agent_kwargs,
         )
         started_at = time.monotonic()
         try:
             result = Runner.run_sync(agent, message, max_turns=max_turns)
         except AgentsException as exception:
-            # l'agent a échoué en cours de route : les tours déjà faits ont été payés
+            # The agent failed midway: the turns already run have been paid for
             if exception.run_data is not None:
                 self._store_usage(
                     model, exception.run_data.context_wrapper.usage, started_at
@@ -57,6 +66,6 @@ class AIClient:
                 cache_read_input_tokens=usage.input_tokens_details.cached_tokens,
             )
         except Exception:
-            # modèle absent de la table de prix de litellm : le coût reste vide
+            # Model missing from the litellm price map: the cost stays empty
             return None
         return input_cost + output_cost
