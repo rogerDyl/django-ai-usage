@@ -10,6 +10,8 @@ from agents import Usage as AgentUsage
 from openai.types.responses import ResponseInputItemParam
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.tracing import TracingConfig
+from litellm.decisions.call import OpenAIDecisionQuestions
+from litellm.types.decisions import OpenAIDecisionAnswer, OpenAIDecisionInput
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
@@ -60,6 +62,43 @@ class AIClient:
         finally:
             self._delete_files(provider, api_key, file_inputs)
 
+    def decide(
+        self,
+        model: str,
+        input: OpenAIDecisionInput,
+        questions: OpenAIDecisionQuestions,
+        timeout: float = 600,
+        **kwargs: Any,
+    ) -> tuple[OpenAIDecisionAnswer, ...]:
+        if "state" in kwargs:
+            raise TypeError("decide() does not support the deprecated state= format")
+
+        provider = model.split("/", 1)[0]
+        api_key = settings.AI_USAGE_API_KEYS.get(provider)
+        if not api_key:
+            raise ImproperlyConfigured(
+                f"Missing API key for provider '{provider}' in AI_USAGE_API_KEYS"
+            )
+
+        started_at = time.monotonic()
+        try:
+            response = litellm.decisions(
+                model=model,
+                input=input,
+                questions=questions,
+                api_key=api_key,
+                timeout=timeout,
+                **kwargs,
+            )
+        except Exception:
+            self._store_usage(
+                model, AgentUsage(), started_at, "decisions", succeeded=False
+            )
+            raise
+        usage = AgentUsage(requests=1, **response.usage.model_dump())
+        self._store_usage(model, usage, started_at, "decisions")
+        return response.answers
+
     def _get_model_settings(
         self,
         provider: str,
@@ -76,6 +115,11 @@ class AIClient:
         return ModelSettings(extra_args=extra_args).resolve(model_settings)
 
     def _run_agent(self, agent, model, message, max_turns, tracing_disabled):
+        reasoning = agent.model_settings.reasoning
+        if reasoning and reasoning.effort:
+            reasoning_effort = reasoning.effort
+        else:
+            reasoning_effort = ""
         started_at = time.monotonic()
         try:
             result = Runner.run_sync(
@@ -88,9 +132,13 @@ class AIClient:
             # The agent failed midway: the turns already run have been paid for
             run_data = getattr(exception, "run_data", None)
             usage = run_data.context_wrapper.usage if run_data else AgentUsage()
-            self._store_usage(agent, model, usage, started_at, succeeded=False)
+            self._store_usage(
+                model, usage, started_at, "agent", reasoning_effort, succeeded=False
+            )
             raise
-        self._store_usage(agent, model, result.context_wrapper.usage, started_at)
+        self._store_usage(
+            model, result.context_wrapper.usage, started_at, "agent", reasoning_effort
+        )
         return result.final_output
 
     def _configure_tracing(self, model, tracing_disabled):
@@ -163,17 +211,25 @@ class AIClient:
                 except Exception:
                     logger.warning(f"Could not delete the uploaded file {file_id}")
 
-    def _store_usage(self, agent, model, usage, started_at, succeeded=True):
+    def _store_usage(
+        self,
+        model,
+        usage,
+        started_at,
+        call_type,
+        reasoning_effort="",
+        succeeded=True,
+    ):
         if usage.requests == 0 and succeeded:
             return
 
         provider, model_name = model.split("/", 1)
-        reasoning = agent.model_settings.reasoning
         Usage.objects.create(
             provider=provider,
             model=model_name,
             feature=self.feature,
-            reasoning_effort=(reasoning and reasoning.effort) or "",
+            call_type=call_type,
+            reasoning_effort=reasoning_effort,
             input_tokens=usage.input_tokens,
             cached_tokens=usage.input_tokens_details.cached_tokens,
             cache_write_tokens=usage.input_tokens_details.cache_write_tokens,
@@ -181,12 +237,12 @@ class AIClient:
             reasoning_tokens=usage.output_tokens_details.reasoning_tokens,
             total_tokens=usage.total_tokens,
             turns=usage.requests,
-            cost=self._compute_cost(model, usage),
+            cost=self._compute_cost(model, usage, call_type),
             duration_ms=(time.monotonic() - started_at) * 1000,
             succeeded=succeeded,
         )
 
-    def _compute_cost(self, model, usage):
+    def _compute_cost(self, model, usage, call_type):
         cost = 0
         for request_usage in usage.request_usage_entries or [usage]:
             input_details = request_usage.input_tokens_details
@@ -197,6 +253,7 @@ class AIClient:
                     completion_tokens=request_usage.output_tokens,
                     cache_read_input_tokens=input_details.cached_tokens,
                     cache_creation_input_tokens=input_details.cache_write_tokens,
+                    call_type="decisions" if call_type == "decisions" else "completion",
                 )
             except Exception:
                 # Model missing from the litellm price map: the cost stays empty

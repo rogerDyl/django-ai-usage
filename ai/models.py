@@ -5,6 +5,7 @@ class Usage(models.Model):
     provider = models.CharField(max_length=50)
     model = models.CharField(max_length=100)
     feature = models.CharField(max_length=100)
+    call_type = models.CharField(max_length=20, default="agent")
     reasoning_effort = models.CharField(max_length=20, blank=True)
     input_tokens = models.PositiveIntegerField()
     cached_tokens = models.PositiveIntegerField(default=0)
