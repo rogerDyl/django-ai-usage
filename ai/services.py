@@ -12,7 +12,7 @@ from agents.tracing import TracingConfig
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
-from ai_usage.models import AIUsage
+from ai.models import Usage
 
 logger = getLogger(__name__)
 
@@ -168,7 +168,7 @@ class AIClient:
 
         provider, model_name = model.split("/", 1)
         reasoning = agent.model_settings.reasoning
-        AIUsage.objects.create(
+        Usage.objects.create(
             provider=provider,
             model=model_name,
             feature=self.feature,

@@ -1,7 +1,7 @@
 from django.db import models
 
 
-class AIUsage(models.Model):
+class Usage(models.Model):
     provider = models.CharField(max_length=50)
     model = models.CharField(max_length=100)
     feature = models.CharField(max_length=100)
