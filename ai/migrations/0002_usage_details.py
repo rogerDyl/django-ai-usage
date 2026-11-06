@@ -6,37 +6,37 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('ai_usage', '0001_initial'),
+        ('ai', '0001_initial'),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='aiusage',
+            model_name='usage',
             name='cache_write_tokens',
             field=models.PositiveIntegerField(default=0),
         ),
         migrations.AddField(
-            model_name='aiusage',
+            model_name='usage',
             name='cached_tokens',
             field=models.PositiveIntegerField(default=0),
         ),
         migrations.AddField(
-            model_name='aiusage',
+            model_name='usage',
             name='reasoning_effort',
             field=models.CharField(blank=True, max_length=20),
         ),
         migrations.AddField(
-            model_name='aiusage',
+            model_name='usage',
             name='reasoning_tokens',
             field=models.PositiveIntegerField(default=0),
         ),
         migrations.AddField(
-            model_name='aiusage',
+            model_name='usage',
             name='succeeded',
             field=models.BooleanField(default=True),
         ),
         migrations.AddField(
-            model_name='aiusage',
+            model_name='usage',
             name='total_tokens',
             field=models.PositiveIntegerField(default=0),
         ),

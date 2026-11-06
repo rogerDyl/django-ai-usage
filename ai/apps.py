@@ -1,7 +1,7 @@
 from django.apps import AppConfig
 
 
-class AIUsageConfig(AppConfig):
-    name = "ai_usage"
-    verbose_name = "AI usage"
+class AIConfig(AppConfig):
+    name = "ai"
+    verbose_name = "AI"
     default_auto_field = "django.db.models.BigAutoField"

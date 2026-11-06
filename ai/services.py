@@ -5,7 +5,8 @@ from logging import getLogger
 from typing import IO, Any
 
 import litellm
-from agents import Agent, ModelSettings, RunConfig, Runner, Usage
+from agents import Agent, ModelSettings, RunConfig, Runner
+from agents import Usage as AgentUsage
 from openai.types.responses import ResponseInputItemParam
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.tracing import TracingConfig
@@ -86,7 +87,7 @@ class AIClient:
         except Exception as exception:
             # The agent failed midway: the turns already run have been paid for
             run_data = getattr(exception, "run_data", None)
-            usage = run_data.context_wrapper.usage if run_data else Usage()
+            usage = run_data.context_wrapper.usage if run_data else AgentUsage()
             self._store_usage(agent, model, usage, started_at, succeeded=False)
             raise
         self._store_usage(agent, model, result.context_wrapper.usage, started_at)
