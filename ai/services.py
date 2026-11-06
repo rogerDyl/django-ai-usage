@@ -1,7 +1,9 @@
+import asyncio
 import base64
 import mimetypes
 import time
 from logging import getLogger
+from collections.abc import Generator
 from typing import IO, Any
 
 import litellm
@@ -61,6 +63,39 @@ class AIClient:
             return self._run_agent(agent, model, message, max_turns, tracing_disabled)
         finally:
             self._delete_files(provider, api_key, file_inputs)
+
+    def run_streamed(
+        self,
+        model: str,
+        instructions: str,
+        message: str | list[ResponseInputItemParam],
+        max_turns: int = 1,
+        tracing_disabled: bool = False,
+        timeout: float = 600,
+        model_settings: ModelSettings | None = None,
+        **agent_kwargs: Any,
+    ) -> Generator[str, None, Any]:
+        provider = model.split("/", 1)[0]
+        api_key = settings.AI_USAGE_API_KEYS.get(provider)
+        if not api_key:
+            raise ImproperlyConfigured(
+                f"Missing API key for provider '{provider}' in AI_USAGE_API_KEYS"
+            )
+
+        agent = Agent(
+            name=self.feature,
+            model=LitellmModel(model=model, api_key=api_key),
+            instructions=instructions,
+            model_settings=self._get_model_settings(
+                provider, timeout, max_turns, model_settings
+            ).resolve(ModelSettings(include_usage=True)),
+            **agent_kwargs,
+        )
+        return (
+            yield from self._stream_agent(
+                agent, model, message, max_turns, tracing_disabled
+            )
+        )
 
     def decide(
         self,
@@ -140,6 +175,55 @@ class AIClient:
             model, result.context_wrapper.usage, started_at, "agent", reasoning_effort
         )
         return result.final_output
+
+    def _stream_agent(self, agent, model, message, max_turns, tracing_disabled):
+        reasoning = agent.model_settings.reasoning
+        if reasoning and reasoning.effort:
+            reasoning_effort = reasoning.effort
+        else:
+            reasoning_effort = ""
+        started_at = time.monotonic()
+        loop = asyncio.new_event_loop()
+        result = None
+        try:
+            result = loop.run_until_complete(
+                self._start_streamed_run(
+                    agent,
+                    message,
+                    max_turns,
+                    self._configure_tracing(model, tracing_disabled),
+                )
+            )
+            events = result.stream_events()
+            while True:
+                try:
+                    event = loop.run_until_complete(anext(events))
+                except StopAsyncIteration:
+                    break
+                if (
+                    event.type == "raw_response_event"
+                    and event.data.type == "response.output_text.delta"
+                ):
+                    yield event.data.delta
+        except BaseException:
+            if result:
+                result.cancel()
+            usage = result.context_wrapper.usage if result else AgentUsage()
+            self._store_usage(
+                model, usage, started_at, "agent", reasoning_effort, succeeded=False
+            )
+            raise
+        finally:
+            loop.close()
+        self._store_usage(
+            model, result.context_wrapper.usage, started_at, "agent", reasoning_effort
+        )
+        return result.final_output
+
+    async def _start_streamed_run(self, agent, message, max_turns, run_config):
+        return Runner.run_streamed(
+            agent, message, max_turns=max_turns, run_config=run_config
+        )
 
     def _configure_tracing(self, model, tracing_disabled):
         provider = model.split("/", 1)[0]
