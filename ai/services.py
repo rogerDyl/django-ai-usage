@@ -134,6 +134,54 @@ class AIClient:
         self._store_usage(model, usage, started_at, "decisions")
         return response.answers
 
+    def generate_image(
+        self,
+        model: str,
+        prompt: str,
+        size: str | None = None,
+        quality: str | None = None,
+        timeout: float = 600,
+        **kwargs: Any,
+    ) -> bytes:
+        provider = model.split("/", 1)[0]
+        api_key = settings.AI_USAGE_API_KEYS.get(provider)
+        if not api_key:
+            raise ImproperlyConfigured(
+                f"Missing API key for provider '{provider}' in AI_USAGE_API_KEYS"
+            )
+
+        started_at = time.monotonic()
+        try:
+            response = litellm.image_generation(
+                model=model,
+                prompt=prompt,
+                n=1,
+                size=size,
+                quality=quality,
+                api_key=api_key,
+                timeout=timeout,
+                **kwargs,
+            )
+            encoded_image = response.data[0].b64_json
+            if not encoded_image:
+                raise ValueError("The image response has no base64 content")
+        except Exception:
+            self._store_usage(model, AgentUsage(), started_at, "image", succeeded=False)
+            raise
+        input_details = getattr(response.usage, "prompt_tokens_details", None)
+        usage = AgentUsage(
+            requests=1,
+            input_tokens=response.usage.input_tokens,
+            input_tokens_details={
+                "cached_tokens": getattr(input_details, "cached_tokens", None) or 0,
+                "cache_write_tokens": 0,
+            },
+            output_tokens=response.usage.output_tokens,
+            total_tokens=response.usage.total_tokens,
+        )
+        self._store_usage(model, usage, started_at, "image")
+        return base64.b64decode(encoded_image)
+
     def _get_model_settings(
         self,
         provider: str,
